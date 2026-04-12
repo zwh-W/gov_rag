@@ -1,0 +1,78 @@
+app:
+  host: "0.0.0.0"
+  port: 6006
+  debug: false  # 开发时可以改成 true，生产必须 false
+
+elasticsearch:
+  host: "localhost"
+  port: 9200
+  scheme: "http"
+  username: ""
+  password: ""
+  # 两个核心索引
+  index_document_meta: "document_meta"
+  index_chunk_info: "chunk_info"
+
+database:
+  engine: "sqlite"       # 本地开发用 sqlite，生产换 mysql
+  path: "rag.db"
+  # mysql 时用下面这几个
+  host: "localhost"
+  port: 3306
+  username: ""
+  password: ""
+  db_name: "gov_rag"
+
+models:
+  embedding:
+    bge-small-zh-v1.5:
+      local_path: "D:/ai_models/bge-small-zh-v1.5"  # 改成你的D盘路径
+      dims: 512
+    bge-base-zh-v1.5:
+      local_path: "D:/ai_models/bge-base-zh-v1.5"  # 改成你的D盘路径
+      dims: 768
+
+  rerank:
+    bge-reranker-base:
+      local_path: "D:/ai_models/BAAI/bge-reranker-base"  # 改成你的D盘路径
+
+# RAG 核心参数：每一个参数都要知道为什么这么设
+rag:
+  # 使用哪个 embedding 模型（对应 models.embedding 里的 key）
+  embedding_model: "bge-small-zh-v1.5"
+  # 是否启用 rerank（关掉可以加速，开启可以提升准确率）
+  use_rerank: true
+  rerank_model: "bge-reranker-base"
+
+  # 分块参数
+  # chunk_size: 每块最大字符数，政务文档建议 256-512
+  # chunk_overlap: 相邻块的重叠字符数，防止语义在边界处断裂
+  chunk_size: 256
+  chunk_overlap: 32
+
+  # 检索参数
+  # bm25_top_k: BM25 召回数量
+  # vector_top_k: 向量召回数量
+  # rrf_k: RRF 融合参数，通常固定 60
+  # rerank_top_k: Rerank 后保留数量，送给 LLM 的最终 chunk 数
+  bm25_top_k: 50
+  vector_top_k: 50
+  rrf_k: 60
+  rerank_top_k: 5
+
+  # 置信度阈值：Rerank 分数低于这个值，不送给 LLM，直接回答"未找到相关依据"
+  # 这是政务场景的核心设计，防止 LLM 基于无关内容瞎编
+  confidence_threshold: 0.0
+
+  # LLM 配置
+  llm_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  llm_model: "qwen-plus"
+  llm_temperature: 0.1  # 政务场景必须低，防止幻觉
+  llm_top_p: 1.0
+  llm_max_tokens: 1024
+
+device: "auto"  # 如果你没有 GPU，就改成 "cpu"；有 GPU 改成 "cuda"
+
+logging:
+  level: "INFO"
+  file: "logs/app.log"
