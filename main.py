@@ -7,6 +7,7 @@ from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
+from app.core.es_client import es
 from app.core.logger import get_logger
 from app.db.session import get_session
 from app.db.models import KnowledgeBase, Document
