@@ -1,11 +1,7 @@
-names = ["小明", "小红", "小刚"]
-scores = [85, 92, 78]
+from elasticsearch import Elasticsearch
 
-# 使用 zip 把它们缝合起来
-combined = zip(names, scores)
-
-# 转换成列表看一眼结果
-print(list(combined))
-# 输出: [('小明', 85), ('小红', 92), ('小刚', 78)]
-for name, score in zip(names, scores):
-    print(f"{name} 考了 {score} 分")
+es = Elasticsearch("http://localhost:9200")
+# 强制删除有问题的旧索引
+es.indices.delete(index="chunk_info_v2", ignore_unavailable=True)
+es.indices.delete(index="document_meta_v2", ignore_unavailable=True)
+print("✅ 旧索引已被彻底清除！")

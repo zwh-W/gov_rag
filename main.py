@@ -18,6 +18,7 @@ from app.api.schemas import (
 )
 from app.services.document_processor import process_document_background
 from app.services.qa_service import chat_with_knowledge_base
+from fastapi.responses import JSONResponse, StreamingResponse
 
 logger = get_logger(__name__)
 
@@ -291,8 +292,35 @@ def chat(req: RAGRequest):
 @app.get("/health", summary="健康检查")
 def health_check():
     return {"status": "ok", "version": "1.0.0"}
+# ============================================================
+# 3.5 流式问答接口 (Streaming Chat)
+# ============================================================
+from app.services.qa_service import stream_chat_with_knowledge_base
 
+@app.post("/chat/stream", summary="智能知识库问答 (流式打字机效果)")
+def chat_stream(req: RAGRequest):
+    if not req.messages:
+        raise HTTPException(status_code=400, detail="对话历史不能为空")
+
+    user_query = req.messages[-1].content
+    if not user_query.strip():
+        raise HTTPException(status_code=400, detail="问题内容不能为空")
+
+    # 获取生成器
+    generator = stream_chat_with_knowledge_base(req.knowledge_id, user_query, req.messages)
+
+    # 🚀 返回 StreamingResponse，并将 media_type 设为 text/event-stream
+    return StreamingResponse(generator, media_type="text/event-stream")
+
+
+# main.py 最底部
 
 if __name__ == "__main__":
     logger.info("启动政务/企业级 RAG 问答系统...")
+
+    # 🚀🚀🚀 【修复 Bug】在此处调用初始化函数，强制提前按规则建表！ 🚀🚀🚀
+    from app.core.es_client import init_es
+
+    init_es()
+
     uvicorn.run(app, host=settings.app.host, port=settings.app.port)

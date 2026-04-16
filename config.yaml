@@ -10,8 +10,8 @@ elasticsearch:
   username: ""
   password: ""
   # 两个核心索引
-  index_document_meta: "document_meta"
-  index_chunk_info: "chunk_info"
+  index_document_meta: "document_meta_v3"
+  index_chunk_info: "chunk_info_v3"
 
 database:
   engine: "sqlite"       # 本地开发用 sqlite，生产换 mysql

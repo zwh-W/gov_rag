@@ -72,13 +72,11 @@ def _chunk_info_mapping() -> dict:
     return {
         "mappings": {
             "properties": {
-                "document_id":  {"type": "integer"},
+                "document_id": {"type": "integer"},
                 "knowledge_id": {"type": "integer"},
-                "page_number":  {"type": "integer"},
-                "chunk_id":     {"type": "integer"},
-                # 面包屑路径：记录 chunk 来自哪个章节，如"第二章>第三条"
-                # 这是你要补充的分块策略里需要用到的字段
-                "breadcrumb":   {"type": "keyword"},
+                "page_number": {"type": "integer"},
+                "chunk_id": {"type": "integer"},
+                "breadcrumb": {"type": "keyword"},
                 "chunk_content": {
                     "type": "text",
                     "analyzer": "ik_max_word",
@@ -86,10 +84,9 @@ def _chunk_info_mapping() -> dict:
                 },
                 "embedding_vector": {
                     "type": "dense_vector",
-                    "element_type": "float",
                     "dims": dims,
                     "index": True,
-                    "index_options": {"type": "int8_hnsw"}
+                    "similarity": "cosine"  # 🚀 替换为最稳健的 cosine，删掉原有的 element_type 和 int8_hnsw
                 }
             }
         }

@@ -1,7 +1,8 @@
 # app/services/qa_service.py
 import traceback
 from typing import List, Dict, Tuple
-
+import json
+from typing import Generator
 from app.core.config import settings
 from app.core.logger import get_logger
 from app.retrieval.query_rewriter import rewrite_query
@@ -257,3 +258,74 @@ def chat_with_knowledge_base(
     except Exception as e:
         logger.error(f"调用大模型报错:\n{traceback.format_exc()}")
         return "生成回答时发生系统错误，请稍后重试。", sources
+
+
+# ============================================================
+# 【完结篇优化 2】新增：流式对话生成器 (Generator)
+#
+# 原理：使用 Python 的 yield 关键字。大模型每吐出一个字，
+# 我们就立刻用 SSE (Server-Sent Events) 格式 yield 出去。
+# 最后把溯源信息 (sources) 也推给前端。
+# ============================================================
+def stream_chat_with_knowledge_base(
+        knowledge_id: int,
+        query: str,
+        history: List[ChatMessage],
+) -> Generator[str, None, None]:
+    try:
+        client = _get_llm_client()
+    except ValueError as e:
+        yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+        return
+
+    # 1. Query Rewrite
+    logger.info(f"[流式] 接收到提问: {query}")
+    search_query = rewrite_query(query, history)
+
+    # 2. 混合检索
+    retrieved_docs = hybrid_search(search_query, knowledge_id)
+    if not retrieved_docs:
+        yield f"data: {json.dumps({'chunk': '抱歉，在知识库中没有检索到相关内容。'}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    # 3. 组装 Prompt 和 溯源
+    user_prompt, sources = build_prompt(query, retrieved_docs)
+
+    # 4. 构造消息
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    recent_history = history[:-1][-6:]
+    for msg in recent_history:
+        messages.append({"role": msg.role.value, "content": msg.content})
+    messages.append({"role": "user", "content": user_prompt})
+
+    # 5. 流式调用大模型 (注意这里的 stream=True)
+    logger.info("[流式] 开始向 LLM 请求数据流...")
+    try:
+        response_stream = client.chat.completions.create(
+            model=settings.rag.llm_model,
+            messages=messages,
+            temperature=settings.rag.llm_temperature,
+            top_p=settings.rag.llm_top_p,
+            max_tokens=settings.rag.llm_max_tokens,
+            stream=True  # 🚀 核心参数：开启数据流！
+        )
+
+        # 🚀 核心循环：只要大模型吐出一个字，就立刻发给前端
+        for chunk in response_stream:
+            delta_content = chunk.choices[0].delta.content
+            if delta_content:
+                # 包装成 SSE 格式：data: {"chunk": "你"} \n\n
+                yield f"data: {json.dumps({'chunk': delta_content}, ensure_ascii=False)}\n\n"
+
+        # 6. 当文字全部吐完后，把溯源信息发给前端
+        sources_dict = [s.model_dump() for s in sources]
+        yield f"data: {json.dumps({'sources': sources_dict}, ensure_ascii=False)}\n\n"
+
+        # 7. 发送结束标记
+        yield "data: [DONE]\n\n"
+        logger.info("[流式] 回答流发送完毕。")
+
+    except Exception as e:
+        logger.error(f"流式调用大模型报错:\n{traceback.format_exc()}")
+        yield f"data: {json.dumps({'error': '生成回答时发生系统错误。'}, ensure_ascii=False)}\n\n"
