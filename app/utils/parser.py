@@ -2,6 +2,13 @@
 import re
 import pdfplumber
 import pytesseract
+import docx
+import os
+from docx.oxml.text.paragraph import CT_P
+from docx.oxml.table import CT_Tbl
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+
 from typing import List, Dict, Any
 
 from app.core.config import settings
@@ -84,6 +91,101 @@ def extract_text_from_pdf(file_path: str) -> str:
         logger.error(f"解析 PDF 失败: {e}")
         raise
     return full_text
+
+
+# ============================================================
+# 【P2修改1】新增：Word 文档 (.docx) 提取逻辑
+#
+# 原因：系统允许上传 Word，但原来只有 PDF 解析器。
+# 解决：使用 python-docx 提取文本。
+# 注意：Word 是流式文本，没有严格的"物理页码"概念，
+#       所以默认全部标记为第1页，重点保留段落和标题结构。
+# ============================================================
+def extract_text_from_docx(file_path: str) -> str:
+    """从 Word 文档提取文本（段落 + 表格，保持原生顺序，Markdown表格）→ RAG 工业级"""
+    full_text = "<<PAGE:1>>\n\n"
+    logger.info(f"开始解析 Word 文件: {file_path}")
+
+    try:
+        doc = docx.Document(file_path)
+
+        # ==============================
+        # 核心：按文档原生顺序遍历（段落 + 表格）
+        # ==============================
+        for child in doc.element.body:
+            # 1. 段落
+            if isinstance(child, CT_P):
+                para = Paragraph(child, doc)
+                text = para.text.strip()
+                if text:
+                    full_text += text + "\n\n"
+
+            # 2. 表格（输出标准 Markdown）
+            elif isinstance(child, CT_Tbl):
+                table = Table(child, doc)
+                full_text += "\n"
+
+                for row_idx, row in enumerate(table.rows):
+                    row_data = [cell.text.replace('\n', ' ').strip() for cell in row.cells]
+                    full_text += "| " + " | ".join(row_data) + " |\n"
+
+                    # 表头加分隔线
+                    if row_idx == 0:
+                        full_text += "|" + "|".join(["---"] * len(row.cells)) + "|\n"
+
+                full_text += "\n"
+
+        # ==============================
+        # 增加：页眉页脚（政务必备）
+        # ==============================
+        full_text += "=== 页眉页脚信息 ===\n"
+        for section in doc.sections:
+            # 页眉
+            for para in section.header.paragraphs:
+                txt = para.text.strip()
+                if txt:
+                    full_text += f"页眉：{txt}\n"
+            # 页脚
+            for para in section.footer.paragraphs:
+                txt = para.text.strip()
+                if txt:
+                    full_text += f"页脚：{txt}\n"
+
+        full_text += "\n"
+
+    except Exception as e:
+        logger.error(f"解析 DOCX 失败: {str(e)}")
+        raise
+
+    return full_text
+
+
+# ============================================================
+# 【P2修改2】新增：统一的文档解析路由器
+#
+# 原因：让上游（processor）不需要关心底层是 PDF 还是 Word，
+#       只管调用 extract_text，这里根据文件后缀自动路由。
+#       这叫“策略模式 (Strategy Pattern)”的极简实现。
+# ============================================================
+def extract_text(file_path: str) -> str:
+    """
+    统一文档文本提取接口。
+    根据文件后缀名自动调用对应的解析器。
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == '.pdf':
+        return extract_text_from_pdf(file_path)
+    elif ext in ['.docx', '.doc']:
+        # 注意：python-docx 原生只支持 .docx。
+        # 如果是老版 .doc，在 Linux 环境下通常需要借助 libreoffice 转换。
+        # 这里为了演示核心逻辑，统一视为 docx 处理。遇到老 doc 可能会抛异常。
+        return extract_text_from_docx(file_path)
+    else:
+        raise ValueError(f"不支持的文件格式解析: {ext}")
+
+
+
 
 
 def chunk_text_by_headers(text: str) -> List[Dict[str, Any]]:

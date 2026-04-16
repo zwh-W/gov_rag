@@ -4,7 +4,7 @@ from elasticsearch.helpers import bulk
 
 from app.db.session import get_session
 from app.db.models import Document
-from app.utils.parser import extract_text_from_pdf, chunk_text_by_headers
+from app.utils.parser import extract_text, chunk_text_by_headers
 from app.core.es_client import es
 from app.core.config import settings
 from app.core.logger import get_logger
@@ -75,15 +75,20 @@ def process_document_background(document_id: int):
         logger.error(f"读取文档信息失败: {traceback.format_exc()}")
         return
 
+
     # ── 主处理阶段：耗时操作，不持有 session ─────────────────────────
     try:
-        # Step1：解析 PDF
-        logger.info(f"Step1/4 解析 PDF: {file_path}")
-        full_text = extract_text_from_pdf(file_path)
+        # Step1：解析 文档
+        logger.info(f"Step1/4 解析文档: {file_path}")
+
+        # ============================================================
+        # 【P2修改4】调用统一路由函数，不再硬编码 PDF 解析
+        # ============================================================
+        # 原来是: full_text = extract_text_from_pdf(file_path)
+        full_text = extract_text(file_path)
 
         if not full_text.strip():
             raise ValueError("提取的文本为空，可能是空白文档或扫描件 OCR 失败")
-
         # Step2：智能分块
         logger.info("Step2/4 智能分块...")
         chunks = chunk_text_by_headers(full_text)

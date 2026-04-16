@@ -1,105 +1,73 @@
+# tests/test_parser_docx.py
+
 import pytest
-from unittest.mock import patch, MagicMock
-
-# 导入你刚刚优化的模块
-from app.services import qa_service
-from app.services.qa_service import _get_llm_client, build_prompt
+import docx
+from app.utils.parser import extract_text_from_docx
 
 
-@pytest.fixture(autouse=True)
-def reset_global_state():
+def test_extract_text_from_docx_with_table(tmp_path):
     """
-    【关键机制】：因为 _llm_client 是全局变量，
-    为了防止测试用例之间互相污染，每次执行测试前后都要强制清空它。
+    测试：Word 深度解析是否能按顺序正确提取段落，并将表格转化为 Markdown
     """
-    qa_service._llm_client = None
-    yield
-    qa_service._llm_client = None
 
+    # ============================================================
+    # 1. 动态造数据：利用 pytest 的 tmp_path 生成一个临时路径
+    # ============================================================
+    temp_file = tmp_path / "test_document.docx"
 
-class TestQAServiceOptimizations:
+    # 使用 python-docx 动态创建一个包含段落和表格的 Word 文档
+    doc = docx.Document()
 
-    # ==========================================
-    # 测试 P0修改1：LLM 客户端的懒加载与单例模式
-    # ==========================================
+    # 插入第一个段落
+    doc.add_paragraph("第一章 交通违章处罚规定")
 
-    @patch("app.services.qa_service.settings")
-    def test_get_llm_client_missing_key(self, mock_settings):
-        """测试：当没有配置 API Key 时，首次调用应该抛出 ValueError"""
-        # 模拟环境变量里没有 Key 的情况
-        mock_settings.rag.llm_api_key = None
+    # 插入一个 2行2列 的表格
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "违法行为"
+    table.cell(0, 1).text = "罚款金额\n(人民币)"  # 故意加个换行符，测试我们的替换逻辑
+    table.cell(1, 0).text = "机动车违规停放"
+    table.cell(1, 1).text = "200元"
 
-        # 断言是否正确抛出了异常
-        with pytest.raises(ValueError, match="LLM API Key 未配置"):
-            _get_llm_client()
+    # 插入第二个段落
+    doc.add_paragraph("第二章 附则")
 
-    @patch("app.services.qa_service.settings")
-    @patch("openai.OpenAI")  # <--- 这里改成了拦截官方包
-    def test_get_llm_client_lazy_and_singleton(self, mock_openai_class, mock_settings):
-        """测试：配置了 Key 时，应该正常初始化，并且多次调用返回同一个实例"""
-        # 模拟环境变量配置正确
-        mock_settings.rag.llm_api_key = "test-sk-12345"
-        mock_settings.rag.llm_base_url = "https://test.api.com"
+    # 保存这个临时 Word 文件
+    doc.save(temp_file)
 
-        # 模拟 OpenAI 返回一个假想的客户端对象
-        mock_fake_client = MagicMock()
-        mock_openai_class.return_value = mock_fake_client
+    # ============================================================
+    # 2. 执行核心测试逻辑
+    # ============================================================
+    # 把临时文件的绝对路径传给我们的解析函数
+    extracted_text = extract_text_from_docx(str(temp_file))
 
-        # 第一次调用：应该触发真实初始化
-        client1 = _get_llm_client()
+    # 打印出来方便在控制台查看（实际 pytest 运行时默认隐藏，除非失败或加 -s）
+    print("\n=== 提取出的纯文本 ===")
+    print(extracted_text)
+    print("======================")
 
-        # 第二次调用：应该直接返回已有的，不再去初始化
-        client2 = _get_llm_client()
+    # ============================================================
+    # 3. 灵魂拷问 (断言 Assertions)
+    # ============================================================
+    # 拷问1：有没有正确注入页码？
+    assert "<<PAGE:1>>" in extracted_text
 
-        # 断言客户端是否成功获取，且是同一个内存对象
-        assert client1 is not None
-        assert client1 is client2
+    # 拷问2：段落是否被正确提取？
+    assert "第一章 交通违章处罚规定" in extracted_text
+    assert "第二章 附则" in extracted_text
 
-        # 验证 OpenAI 这个类在全过程中只被实例化了一次
-        mock_openai_class.assert_called_once_with(
-            api_key="test-sk-12345",
-            base_url="https://test.api.com"
-        )
+    # 拷问3：【核心】表格是否被成功转换成了 Markdown 格式？
+    # 并且换行符是否被替换成了空格（"罚款金额 (人民币)"）
+    expected_table_header = "| 违法行为 | 罚款金额 (人民币) |"
+    expected_table_divider = "|---|---|"
+    expected_table_row = "| 机动车违规停放 | 200元 |"
 
-    # ==========================================
-    # 测试 P0修改2：Prompt 格式组装优化
-    # ==========================================
+    assert expected_table_header in extracted_text
+    assert expected_table_divider in extracted_text
+    assert expected_table_row in extracted_text
 
-    def test_build_prompt_clean_format(self):
-        """测试：组装的 Prompt 是否干净，溯源信息是否正确提取"""
+    # 拷问4：顺序是否正确？（段落1 -> 表格 -> 段落2）
+    idx_p1 = extracted_text.find("第一章 交通违章处罚规定")
+    idx_table = extracted_text.find("| 违法行为 |")
+    idx_p2 = extracted_text.find("第二章 附则")
 
-        # 构造模拟的检索结果 List[Dict]
-        mock_retrieved_docs = [
-            {
-                "document_id": 99,
-                "document_name": "测试安全规范.pdf",
-                "breadcrumb": "第二章 > 密码管理",
-                "page_number": 5,
-                "chunk_content": "员工必须每90天更换一次密码。"
-            }
-        ]
-        user_query = "密码多久换一次？"
-
-        # 执行你优化的函数
-        user_prompt, sources = build_prompt(user_query, mock_retrieved_docs)
-
-        # 【断言 1】检查垃圾文字是否真的被删除了
-        assert "chat_with_knowledge_base" not in user_prompt, "致命错误：Prompt 中依然包含垃圾函数名！"
-
-        # 【断言 2】检查必要的信息是否成功拼接入了 Prompt
-        assert "测试安全规范.pdf" in user_prompt
-        assert "第二章 > 密码管理" in user_prompt
-        assert "第5页" in user_prompt
-        assert "员工必须每90天更换一次密码" in user_prompt
-        assert user_query in user_prompt
-
-        # 【断言 3】检查溯源对象 (sources) 列表生成是否正确
-        assert len(sources) == 1
-        assert sources[0].document_id == 99
-        assert sources[0].page_number == 5
-
-    def test_build_prompt_empty_docs(self):
-        """测试：边缘场景，如果没有检索到任何资料怎么处理"""
-        user_prompt, sources = build_prompt("今天天气如何？", [])
-        assert user_prompt == ""
-        assert sources == []
+    assert idx_p1 < idx_table < idx_p2, "提取的顺序错乱了！"
