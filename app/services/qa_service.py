@@ -4,11 +4,11 @@ from typing import List, Dict, Tuple
 
 from app.core.config import settings
 from app.core.logger import get_logger
+from app.retrieval.query_rewriter import rewrite_query
 from app.retrieval.searcher import hybrid_search
 from app.api.schemas import RAGSource, ChatMessage
 
 logger = get_logger(__name__)
-
 
 # ============================================================
 # 【P0修改1】LLM 客户端改为懒加载，不在模块级直接初始化
@@ -66,6 +66,45 @@ SYSTEM_PROMPT = """你是一个专业的政务与企业知识库助手。
 """
 
 
+# ============================================================
+# 【P1修改1】新增：从数据库批量反查文档名
+#
+# 原来的问题：
+#   doc_name = f"文档_{doc_id}"  ← 硬编码占位符
+#   答案溯源里显示"文档_1"、"文档_2"，用户完全不知道是哪个文档。
+#
+# 解决：
+#   收集所有 retrieved_docs 里的 document_id，
+#   一次性查数据库，拿到真实的文档标题。
+#
+# 为什么批量查而不是逐条查？
+#   5个 chunk 来自3个不同文档，逐条查执行5次SQL，
+#   批量查用 IN 语句只执行1次，高并发时差距明显。
+# ============================================================
+
+def _fetch_document_names(doc_ids: List[int]) -> Dict[int, str]:
+    """
+        批量从数据库查询文档标题。
+        返回 {document_id: title} 字典。
+        查询失败时返回空字典，调用方用 doc_id 兜底。
+    """
+    if not doc_ids:
+        return {}
+    try:
+        from app.db.session import get_session
+        from app.db.models import Document
+
+        with get_session() as session:
+            docs = session.query(Document.document_id, Document.title).filter(
+                Document.document_id.in_(doc_ids)
+
+            ).all()
+            return {doc.document_id: doc.title for doc in docs}
+    except Exception:
+        logger.warning(f"反查文档名失败，将使用文档ID代替:\n{traceback.format_exc()}")
+        return {}
+
+
 def build_prompt(query: str, retrieved_docs: List[Dict]) -> Tuple[str, List[RAGSource]]:
     """
     将检索到的文档块拼接成 Prompt，同时提取溯源信息。
@@ -76,6 +115,12 @@ def build_prompt(query: str, retrieved_docs: List[Dict]) -> Tuple[str, List[RAGS
     """
     if not retrieved_docs:
         return "", []
+    # ============================================================
+    # 【P1修改2】批量反查文档名，替换原来的硬编码占位符
+    # ============================================================
+    all_doc_ids = list({doc.get("document_id", 0) for doc in retrieved_docs})
+    doc_name_map = _fetch_document_names(all_doc_ids)
+
 
     context_str = ""
     sources = []
@@ -84,10 +129,11 @@ def build_prompt(query: str, retrieved_docs: List[Dict]) -> Tuple[str, List[RAGS
         content = doc.get("chunk_content", "")
         breadcrumb = doc.get("breadcrumb", "未知章节")
         doc_id = doc.get("document_id", 0)
-        doc_name = doc.get("document_name", f"文档_{doc_id}")
         page_number = doc.get("page_number", 1)
 
-        # 拼接给 LLM 看的上下文，带章节路径帮助 LLM 理解来源
+        # 优先用数据库查到的真实文档名，查不到才用 ID 兜底
+        doc_name = doc_name_map.get(doc_id, f"文档_{doc_id}")
+
         context_str += f"--- 资料 [{i + 1}] ---\n"
         context_str += f"来源：{doc_name}｜章节：{breadcrumb}｜第{page_number}页\n"
         context_str += f"内容：{content}\n\n"
@@ -123,39 +169,79 @@ def build_prompt(query: str, retrieved_docs: List[Dict]) -> Tuple[str, List[RAGS
 def chat_with_knowledge_base(
         knowledge_id: int,
         query: str,
-        history: List[ChatMessage]
+        history: List[ChatMessage],
 ) -> Tuple[str, List[RAGSource]]:
     """
-    核心 QA 流程：混合检索 -> 组装 Prompt -> 调用千问 -> 返回答案+溯源
+    核心 QA 流程：
+    P0: 混合检索 -> 组装Prompt -> 调用LLM -> 返回答案+溯源
+    P1新增: Query Rewrite + 真实文档名 + history传入LLM
     """
-    # ── 1. 初始化 LLM 客户端（懒加载，失败时直接返回错误信息）──────
+    # ── 初始化 LLM 客户端 ────────────────────────────────────────
     try:
         client = _get_llm_client()
     except ValueError as e:
         logger.error(str(e))
-        return "系统未配置大模型 API Key，无法生成回答。请联系管理员。", []
+        return "系统未配置大模型 API Key，无法生成回答。", []
 
-    # ── 2. 混合检索 + Rerank ────────────────────────────────────────
+    # ── 1. Query Rewrite：多轮对话时先改写再检索 ─────────────────
+    # ============================================================
+    # 【P1修改3】接入 Query Rewrite
+    #
+    # 原来的问题：
+    #   直接用原始 query 去检索，多轮对话时"那例外情况呢"
+    #   这类依赖上下文的问题完全检索不到相关内容。
+    #
+    # 解决：
+    #   先改写 query，用改写后的 search_query 去 ES 检索。
+    #   发给 LLM 的仍然是用户的原始 query（更自然）。
+    # ============================================================
     logger.info(f"接收到用户提问: {query}")
-    retrieved_docs = hybrid_search(query, knowledge_id)
+    search_query = rewrite_query(query, history)
+
+    # ── 2. 混合检索 + Rerank ─────────────────────────────────────
+    retrieved_docs = hybrid_search(search_query, knowledge_id)
 
     if not retrieved_docs:
         return "抱歉，在知识库中没有检索到与您问题相关的内容。", []
 
-    # ── 3. 组装 Prompt 和溯源列表 ───────────────────────────────────
+    # ── 3. 组装 Prompt 和溯源列表 ────────────────────────────────
     user_prompt, sources = build_prompt(query, retrieved_docs)
-    logger.debug(f"组装的 User Prompt:\n{user_prompt}")
 
-    # ── 4. 构造发给 LLM 的消息列表 ─────────────────────────────────
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
-    # 注意：多轮对话的 history 处理在 P1 阶段实现（Query Rewrite）
-    # 现在先保持单轮，确保基础功能正确
+    # ── 4. 构造发给 LLM 的完整消息列表 ──────────────────────────
+    # ============================================================
+    # 【P1修改4】真正把对话历史传给 LLM
+    #
+    # 原来的问题：
+    #   history 参数接收了但完全没用，每轮都从零开始，
+    #   LLM 不记得之前说过什么，无法进行连贯的多轮对话。
+    #
+    # 解决：把最近3轮历史插入 messages，让 LLM 有上下文记忆。
+    #
+    # 为什么只取最近3轮（6条消息）？
+    #   Token 限制 + 相关性递减 + 成本控制，三个原因。
+    # ============================================================
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # 4. 调用通义千问大模型
-    logger.info("正在调用大模型生成回答...")
+    # history[:-1] 去掉最后一条（当前用户提问），[-6:] 取最近6条
+    recent_history = history[:-1][-6:]
+
+    for msg in recent_history:
+        # ============================================================
+        # 【P1修改5】MessageRole 枚举转字符串
+        #
+        # schemas.py 里 role 现在是 MessageRole 枚举，
+        # OpenAI SDK 要求传字符串，用 msg.role.value 取值。
+        # ============================================================
+        messages.append({
+            "role": msg.role.value,
+            "content": msg.content,
+        })
+
+    # 最后加入当前轮的用户提问（用带 context 的 user_prompt）
+    messages.append({"role": "user", "content": user_prompt})
+
+    # ── 5. 调用千问大模型 ────────────────────────────────────────
+    logger.info(f"调用大模型，消息共 {len(messages)} 条（含历史 {len(recent_history)} 条）")
     try:
         response = client.chat.completions.create(
             model=settings.rag.llm_model,
@@ -170,4 +256,4 @@ def chat_with_knowledge_base(
 
     except Exception as e:
         logger.error(f"调用大模型报错:\n{traceback.format_exc()}")
-        return f"生成回答时发生系统错误，请稍后重试。错误信息：{str(e)}", sources
+        return "生成回答时发生系统错误，请稍后重试。", sources
