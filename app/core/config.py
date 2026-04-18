@@ -11,13 +11,12 @@ import os
 import yaml
 import warnings
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict
 from pathlib import Path
 from dotenv import load_dotenv
 
-# 加载项目根目录的 .env 文件（必须在读取环境变量之前！）
 load_dotenv()
-# 项目根目录：这个文件在 app/core/config.py，所以往上两层是根目录
+
 BASE_DIR = Path(__file__).parent.parent.parent
 
 
@@ -28,11 +27,6 @@ def _load_yaml() -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-
-# ==========================================
-# 用 dataclass 定义各模块的配置结构
-# 好处：有类型提示、IDE 能自动补全、少写很多 config["xxx"]
-# ==========================================
 
 @dataclass
 class AppConfig:
@@ -80,7 +74,6 @@ class RAGConfig:
     llm_temperature: float
     llm_top_p: float
     llm_max_tokens: int
-    # API Key 从环境变量读取，不写进 yaml
     llm_api_key: str = field(default="")
 
 
@@ -92,12 +85,6 @@ class LoggingConfig:
 
 @dataclass
 class Settings:
-    """
-    全局配置入口，使用方式：
-        from app.core.config import settings
-        settings.rag.chunk_size
-        settings.es.host
-    """
     app: AppConfig
     es: ESConfig
     db: DatabaseConfig
@@ -105,21 +92,15 @@ class Settings:
     logging: LoggingConfig
     device: str
     base_dir: Path
-    # embedding 和 rerank 模型的详细参数（路径、维度等）
     embedding_model_params: Dict
     rerank_model_params: Dict
 
 
 def _auto_detect_device() -> str:
-    """
-    【优化1】自动检测设备：有GPU用cuda，没有用cpu
-    不用手动改 config.yaml 里的 device 了
-    """
     try:
         import torch
         if torch.cuda.is_available():
             return "cuda"
-        # 有Apple Silicon的话也可以用mps
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             return "mps"
     except ImportError:
@@ -127,25 +108,18 @@ def _auto_detect_device() -> str:
     return "cpu"
 
 
-def _validate_model_paths(settings: Settings) -> None:
-    """
-    【优化2】启动时检查模型路径是否存在
-    如果模型路径不对，提前报错，不用等到运行时才发现
-    """
-    # 检查Embedding模型路径
-    embed_model = settings.rag.embedding_model
-    embed_path = settings.embedding_model_params[embed_model]["local_path"]
+def _validate_model_paths(s: Settings) -> None:
+    embed_model = s.rag.embedding_model
+    embed_path = s.embedding_model_params[embed_model]["local_path"]
     if not Path(embed_path).exists():
         warnings.warn(
             f"Embedding模型路径不存在：{embed_path}\n"
             f"请检查 config.yaml 里的 models.embedding.{embed_model}.local_path",
             stacklevel=2
         )
-
-    # 检查Rerank模型路径（如果启用了Rerank）
-    if settings.rag.use_rerank:
-        rerank_model = settings.rag.rerank_model
-        rerank_path = settings.rerank_model_params[rerank_model]["local_path"]
+    if s.rag.use_rerank:
+        rerank_model = s.rag.rerank_model
+        rerank_path = s.rerank_model_params[rerank_model]["local_path"]
         if not Path(rerank_path).exists():
             warnings.warn(
                 f"Rerank模型路径不存在：{rerank_path}\n"
@@ -156,25 +130,38 @@ def _validate_model_paths(settings: Settings) -> None:
 
 def _build_settings() -> Settings:
     raw = _load_yaml()
-
     rag_raw = raw["rag"]
 
-    # 【优化3】Windows友好的环境变量读取：同时支持 DASHSCOPE_API_KEY 和 LLM_API_KEY
-    llm_api_key = os.getenv("LLM_API_KEY", os.getenv("LLM_API_KEY", ""))
+    # ============================================================
+    # 【Bug修复】环境变量读取顺序错误
+    #
+    # 原来的代码：
+    #   os.getenv("LLM_API_KEY", os.getenv("LLM_API_KEY", ""))
+    #                                       ↑ 两个都是同一个变量名
+    #   DASHSCOPE_API_KEY 永远不会被读取，
+    #   导致按文档设置了 DASHSCOPE_API_KEY 也不生效。
+    #
+    # 修复后：
+    #   优先读 DASHSCOPE_API_KEY（阿里云官方变量名）
+    #   其次读 LLM_API_KEY（通用变量名）
+    #   都没有才返回空字符串
+    # ============================================================
+    llm_api_key = os.getenv("DASHSCOPE_API_KEY", os.getenv("LLM_API_KEY", ""))
+
     if not llm_api_key:
         warnings.warn(
             "环境变量 DASHSCOPE_API_KEY 或 LLM_API_KEY 未设置，LLM 相关接口将无法使用。\n"
-            "Windows PowerShell 设置方式：$env:DASHSCOPE_API_KEY='your-key'\n"
-            "Windows CMD 设置方式：set DASHSCOPE_API_KEY=your-key",
+            "Linux/Mac：export DASHSCOPE_API_KEY='your-key'\n"
+            "Windows PowerShell：$env:DASHSCOPE_API_KEY='your-key'\n"
+            "或在项目根目录 .env 文件写入：DASHSCOPE_API_KEY=your-key",
             stacklevel=2
         )
 
-    # 自动检测设备
     device = raw.get("device", "auto")
     if device == "auto":
         device = _auto_detect_device()
 
-    settings = Settings(
+    result = Settings(
         app=AppConfig(**raw["app"]),
         es=ESConfig(**raw["elasticsearch"]),
         db=DatabaseConfig(**raw["database"]),
@@ -203,11 +190,8 @@ def _build_settings() -> Settings:
         rerank_model_params=raw["models"]["rerank"],
     )
 
-    # 启动时验证模型路径
-    _validate_model_paths(settings)
-
-    return settings
+    _validate_model_paths(result)
+    return result
 
 
-# 单例：模块级别只初始化一次
 settings = _build_settings()
