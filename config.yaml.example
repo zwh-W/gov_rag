@@ -1,0 +1,81 @@
+app:
+  host: "0.0.0.0"
+  port: 6006
+  debug: false
+
+elasticsearch:
+  host: "localhost"
+  port: 9200
+  scheme: "http"
+  username: ""
+  password: ""
+  index_document_meta: "document_meta_v3"
+  index_chunk_info: "chunk_info_v3"
+
+database:
+  # 本地开发可使用 sqlite；生产环境建议改为 mysql
+  engine: "sqlite"
+  path: "rag.db"
+
+  # 当 engine 改为 mysql 或 mysql+pymysql 时，配置以下字段
+  host: "localhost"
+  port: 3306
+  username: "your_mysql_username"
+  password: "your_mysql_password"
+  db_name: "gov_rag"
+
+models:
+  embedding:
+    bge-small-zh-v1.5:
+      # 修改为你的本地 embedding 模型路径
+      # 示例："/path/to/bge-small-zh-v1.5"
+      local_path: "your_local_path/bge-small-zh-v1.5"
+      dims: 512
+
+    bge-base-zh-v1.5:
+      # 修改为你的本地 embedding 模型路径
+      local_path: "your_local_path/bge-base-zh-v1.5"
+      dims: 768
+
+  rerank:
+    bge-reranker-base:
+      # 修改为你的本地 reranker 模型路径
+      local_path: "your_local_path/bge-reranker-base"
+
+rag:
+  # Embedding 模型名称，对应 models.embedding 下的 key
+  embedding_model: "bge-small-zh-v1.5"
+
+  # 是否启用 rerank；开启通常能提升上下文相关性，但会增加耗时
+  use_rerank: true
+  rerank_model: "bge-reranker-base"
+
+  # 分块参数
+  chunk_size: 256
+  chunk_overlap: 32
+
+  # 检索参数
+  bm25_top_k: 50
+  vector_top_k: 50
+  rrf_k: 60
+  rerank_top_k: 5
+
+  # Rerank 置信度阈值；分数低于该值的 chunk 不进入最终上下文
+  confidence_threshold: 0.0
+
+  # LLM 配置
+  # API Key 不要写在 config.yaml 中，请通过环境变量配置：
+  # DASHSCOPE_API_KEY=your_api_key
+  # 或 LLM_API_KEY=your_api_key
+  llm_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  llm_model: "qwen-plus"
+  llm_temperature: 0.1
+  llm_top_p: 1.0
+  llm_max_tokens: 1024
+
+# auto / cpu / cuda / mps
+device: "auto"
+
+logging:
+  level: "INFO"
+  file: "logs/app.log"
