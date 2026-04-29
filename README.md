@@ -508,12 +508,3 @@ python scripts/evaluate.py \
 - 增加接口压测和缓存策略。
 - 对表格、图片、扫描件 OCR 质量做更细粒度处理。
 
-## 14. 面试讲解建议
-
-可以用下面这段话介绍项目：
-
-> 这个项目是一个面向政务和企业文档的 RAG 问答系统。我主要做了三层能力：第一是文档处理层，支持 PDF/Word 解析、OCR 兜底和章/节/条结构化分块；第二是检索层，基于 Elasticsearch 实现 BM25 和 dense_vector 双路召回，再用 RRF 融合和 Reranker 精排；第三是问答和评估层，支持 Query Rewrite、多轮上下文、引用溯源、SSE 流式输出，并通过 RAGAS 对不同检索策略做离线评估。这个项目的重点不是单纯调用大模型 API，而是把 RAG 做成一个可上传、可检索、可溯源、可评估的后端服务。
-
-## 15. License
-
-MIT License
